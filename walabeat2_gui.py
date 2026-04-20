@@ -392,8 +392,9 @@ class DrumApp(tk.Frame):
         dot_positions = []   # (phi_deg, r_cm) for canvas dots
 
         for t in targets:
-            phi_deg = math.degrees(math.atan2(t.xPosCm, t.zPosCm))
-            r_cm    = math.hypot(t.xPosCm, t.zPosCm)
+            # GetSensorTargets polar convention: xPosCm = R (range cm), yPosCm = phi (degrees)
+            r_cm    = t.xPosCm
+            phi_deg = t.yPosCm
             if r_cm < R_MIN or r_cm > R_MAX:
                 continue
             dot_positions.append((phi_deg, r_cm))
