@@ -43,9 +43,7 @@ class _Mixer:
         self._lock    = threading.Lock()
         self._proc    = subprocess.Popen(
             ['aplay', '-q', '-t', 'raw', '-f', 'S16_LE',
-             '-r', str(self.RATE), '-c', '1',
-             '--period-size=256', '--buffer-size=1024',  # ~6 ms period, ~23 ms total ALSA buffer
-             '-'],
+             '-r', str(self.RATE), '-c', '1', '-'],
             stdin=subprocess.PIPE,
             bufsize=0,              # unbuffered — every chunk reaches aplay immediately
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
