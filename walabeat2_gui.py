@@ -45,6 +45,7 @@ class _Mixer:
             ['aplay', '-q', '-t', 'raw', '-f', 'S16_LE',
              '-r', str(self.RATE), '-c', '1', '-'],
             stdin=subprocess.PIPE,
+            bufsize=0,              # unbuffered — every chunk reaches aplay immediately
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -130,10 +131,18 @@ BAR_MAX          = 1500
 # scales far-zone energy before threshold comparison and glow to equalise sensitivity.
 FAR_BOOST        = 3.0
 
-# ── Drum-roll constants (NEAR + outer-right = bottom-right of fan) ────────────
-ROLL_WAV            = _wav('snare')
-ROLL_LOCKOUT_FRAMES = 2       # fires every 3 frames while sustained above threshold
-ROLL_FLASH_MS       = 80
+# ── Drum-roll constants ────────────────────────────────────────────────────────
+# Roll occupies the extreme-right phi strip (separate from CLAP/OpenHH).
+# It spans ALL R depths — a full open-hand sweep over the strip fires it;
+# a small two-finger touch won't reliably reach the extreme bins.
+ROLL_WAV             = _wav('snare')
+ROLL_LOCKOUT_FRAMES  = 2    # fires every 3 frames while sustained
+ROLL_SUSTAIN_FRAMES  = 2    # frames above threshold before roll activates
+ROLL_FLASH_MS        = 80
+
+# Screen-angle range for the roll-strip visual on the fan (extreme right sector)
+ROLL_STRIP_A0 = 30
+ROLL_STRIP_A1 = 44
 
 # ── Walabot arena ─────────────────────────────────────────────────────────────
 R_MIN, R_MAX, R_RES             = 15, 60, 10
@@ -151,13 +160,14 @@ R_FAR_PX   = 270
 DEAD_R_PX    = 20   # pixel gap at near/far radial boundary
 DEAD_PHI_DEG =  4   # angular gap between adjacent phi sectors
 
-# Active sector screen-angle ranges (shrunk inward from full 30° zones):
-# outer sectors only lose the gap on their inner edge (canvas edge = outer boundary)
+# Active sector screen-angle ranges for the 8 drum pads.
+# The outer-right zone (CLAP / Open HH) is narrowed: the 3 extreme-right phi bins
+# are reserved for the roll strip (ROLL_STRIP_A0..ROLL_STRIP_A1), drawn separately.
 PHI_SECTORS = [
     (120 + DEAD_PHI_DEG, 150),
     ( 90 + DEAD_PHI_DEG, 120 - DEAD_PHI_DEG),
     ( 60 + DEAD_PHI_DEG,  90 - DEAD_PHI_DEG),
-    ( 30,                  60 - DEAD_PHI_DEG),
+    ( ROLL_STRIP_A1 + 2,  60 - DEAD_PHI_DEG),   # outer-right — narrowed; roll strip on right
 ]
 
 
@@ -186,11 +196,13 @@ class DrumApp(tk.Frame):
         self.pad_state    = {p[0]: 'out' for p in PADS}
         self.pad_delay    = {p[0]: 0     for p in PADS}
         self.pad_hits     = {p[0]: 0     for p in PADS}
-        self.cycleId      = None
-        self.r_ranges     = None
-        self.phi_ranges   = None
-        self.roll_lockout = 0
-        self.roll_hits    = 0
+        self.cycleId        = None
+        self.r_ranges       = None
+        self.phi_ranges     = None
+        self.roll_phi_range = None
+        self.roll_lockout   = 0
+        self.roll_sustain   = 0
+        self.roll_hits      = 0
         self.threshold    = ENERGY_THRESHOLD   # live-adjustable via slider
 
         self.statusVar = tk.StringVar(value='Connecting...')
@@ -232,27 +244,20 @@ class DrumApp(tk.Frame):
         c.create_oval(SX-6, SY-6, SX+6, SY+6, fill='#555', outline='#888')
         c.create_text(SX, SY+14, text='SENSOR', fill='#555', font='TkFixedFont 7')
 
-        # Zone depth labels
+        # Zone depth labels — guide the user's gestures
         c.create_text(SX - R_FAR_PX - 8, SY - (R_NEAR_PX + R_FAR_PX) / 2,
-                      text='FAR',  fill='#444', font='TkFixedFont 8', anchor=tk.E)
+                      text='FULL HAND', fill='#444', font='TkFixedFont 7', anchor=tk.E)
         c.create_text(SX - R_FAR_PX - 8, SY - R_NEAR_PX * 0.55,
-                      text='NEAR', fill='#444', font='TkFixedFont 8', anchor=tk.E)
+                      text='2 FINGERS', fill='#444', font='TkFixedFont 7', anchor=tk.E)
 
-        # ROLL badge — bottom-right canvas corner
-        _bx1, _by1, _bx2, _by2 = 418, 312, 572, 375
-        _bmx = (_bx1 + _bx2) // 2
-        self.roll_badge_bg = c.create_rectangle(
-            _bx1, _by1, _bx2, _by2,
-            fill='#111b11', outline='#335533', width=2)
-        c.create_text(_bmx, _by1 + 16,
-                      text='↕  ROLL', fill='#446644',
-                      font='TkFixedFont 10 bold', anchor=tk.CENTER)
+        # Roll strip — narrow sector at extreme right, full radial depth
+        roll_pts = sector_poly(SX, SY, 5, R_FAR_PX, ROLL_STRIP_A0, ROLL_STRIP_A1)
+        self.roll_zone_id = c.create_polygon(*roll_pts, fill='#111b11', outline='#335533', width=1)
+        rlx, rly = label_pos(SX, SY, (5 + R_FAR_PX) / 2, ROLL_STRIP_A0, ROLL_STRIP_A1)
+        c.create_text(rlx, rly - 8,  text='↕',    fill='#446644', font='TkFixedFont 11 bold', anchor=tk.CENTER)
+        c.create_text(rlx, rly + 8,  text='ROLL',  fill='#446644', font='TkFixedFont 7',      anchor=tk.CENTER)
         self.roll_count_id = c.create_text(
-            _bmx, _by1 + 34,
-            text='', fill='#557755', font='TkFixedFont 9', anchor=tk.CENTER)
-        c.create_text(_bmx, _by2 - 10,
-                      text='wave near-right rapidly',
-                      fill='#2a3a2a', font='TkFixedFont 7', anchor=tk.CENTER)
+            rlx, rly + 22, text='', fill='#557755', font='TkFixedFont 8', anchor=tk.CENTER)
 
         # Sector polygons, name labels, hit count labels
         for pid, label, r_idx, phi_idx, col_idle, col_hit, wav in PADS:
@@ -320,14 +325,17 @@ class DrumApp(tk.Frame):
         mid = sX // 2
         self.r_ranges = [range(0, mid), range(mid + 1, sX)]
 
-        # 4 phi zones — skip 1 bin on each side facing an adjacent zone
+        # 4 drum-pad phi zones — skip 1 bin on each side facing an adjacent zone.
+        # The extreme-right 3 bins are reserved exclusively for the roll strip.
         q = sY // 4
         self.phi_ranges = [
-            range(0,           q - 1),
-            range(q + 1,   2*q - 1),
-            range(2*q + 1, 3*q - 1),
-            range(3*q + 1,     sY),
+            range(0,           q - 1),        # outer-left
+            range(q + 1,   2*q - 1),          # inner-left
+            range(2*q + 1, 3*q - 1),          # inner-right
+            range(3*q + 1, sY - 3),           # outer-right (CLAP / Open HH)
         ]
+        # Roll strip: extreme-right bins, spans ALL R depths (full arm sweep)
+        self.roll_phi_range = range(sY - 3, sY)
 
         self._update_status()
         self.cycleId = self.after(33, self.loop)
@@ -343,15 +351,9 @@ class DrumApp(tk.Frame):
             return
 
         thresh = self.threshold
+        sX = len(img)
 
-        # Compute roll energy first — needed to suppress CLAP during roll.
-        # CLAP and ROLL share the same zone (near, outer-right): without this
-        # guard every roll wave re-arms CLAP and fires it too.
-        roll_e = sum(img[i][j]
-                     for i in self.r_ranges[0]
-                     for j in self.phi_ranges[3])
-        is_rolling = roll_e > thresh
-
+        # Pad detection
         for pid, label, r_idx, phi_idx, col_idle, col_hit, wav in PADS:
             energy = sum(img[i][j]
                          for i in self.r_ranges[r_idx]
@@ -373,21 +375,37 @@ class DrumApp(tk.Frame):
             # Hit detection
             if energy > thresh:
                 if self.pad_state[pid] == 'out' and self.pad_delay[pid] == 0:
-                    if not (pid == 'clap' and is_rolling):
-                        self._hit(pid, wav, col_hit)
+                    self._hit(pid, wav, col_hit)
                 self.pad_state[pid] = 'in'
             else:
-                # Keep CLAP armed as 'in' while rolling so it can't re-trigger
-                # between the rapid energy pulses of each roll wave.
-                if not (pid == 'clap' and is_rolling):
-                    self.pad_state[pid] = 'out'
+                self.pad_state[pid] = 'out'
             if self.pad_delay[pid] > 0:
                 self.pad_delay[pid] -= 1
 
-        # Drum-roll: fires every ROLL_LOCKOUT_FRAMES+1 frames while sustained
+        # Roll strip — exclusive extreme-right bins, all R depths
+        roll_e = sum(img[i][j]
+                     for i in range(sX)
+                     for j in self.roll_phi_range)
+
+        # Glow the roll strip (suppressed during flash)
+        if self.roll_lockout == 0:
+            roll_frac = min(roll_e / float(BAR_MAX), 1.0) * 0.45
+            self.canvas.itemconfigure(
+                self.roll_zone_id,
+                fill='#{:02x}{:02x}{:02x}'.format(
+                    int(0x11 + (0x44 - 0x11) * roll_frac),
+                    int(0x1b + (0xff - 0x1b) * roll_frac),
+                    int(0x11 + (0x44 - 0x11) * roll_frac)))
+
+        # Sustain guard: must be above threshold for ROLL_SUSTAIN_FRAMES before firing
+        if roll_e > thresh:
+            self.roll_sustain = min(self.roll_sustain + 1, ROLL_SUSTAIN_FRAMES + 1)
+        else:
+            self.roll_sustain = 0
+
         if self.roll_lockout > 0:
             self.roll_lockout -= 1
-        if is_rolling and self.roll_lockout == 0:
+        if self.roll_sustain >= ROLL_SUSTAIN_FRAMES and self.roll_lockout == 0:
             self._roll_hit()
 
         self.cycleId = self.after(33, self.loop)
@@ -430,9 +448,9 @@ class DrumApp(tk.Frame):
     def _roll_hit(self):
         self.roll_hits += 1
         self.roll_lockout = ROLL_LOCKOUT_FRAMES
-        self.canvas.itemconfigure(self.roll_badge_bg, fill='#aaffaa')
+        self.canvas.itemconfigure(self.roll_zone_id, fill='#44ff44')
         self.after(ROLL_FLASH_MS, lambda: self.canvas.itemconfigure(
-            self.roll_badge_bg, fill='#111b11'))
+            self.roll_zone_id, fill='#111b11'))
         self.canvas.itemconfigure(self.roll_count_id, text=str(self.roll_hits))
         _play(ROLL_WAV)
         self._update_status()
