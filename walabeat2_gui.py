@@ -225,6 +225,7 @@ class DrumApp(tk.Frame):
         self.roll_phi_range = None
         self.roll_lockout   = 0
         self.roll_sustain   = 0
+        self._dbg           = 0   # diagnostic frame counter — remove after calibration
         self.roll_hits      = 0
         self.target_dots    = []   # canvas oval IDs for live hand-position indicators
         self.threshold    = ENERGY_THRESHOLD   # live-adjustable via slider
@@ -375,7 +376,7 @@ class DrumApp(tk.Frame):
             wlbt.Trigger()
             res     = wlbt.GetRawImageSlice()
             img     = res[0]
-            targets = wlbt.GetSensorTargets()
+            targets = wlbt.GetSensorTargets()   # for canvas dots only; may return empty
         except wlbt.WalabotError:
             self.statusVar.set('Lost connection — reconnecting…')
             self.cycleId = self.after(2000, self._reconnect)
@@ -384,42 +385,15 @@ class DrumApp(tk.Frame):
         thresh = self.threshold
         sX = len(img)
 
-        # ── Build active-zone map from tracked targets ─────────────────────────
-        # Each target represents one hand (MTI filter ensures only moving objects).
-        # Two hands in different zones both appear here → simultaneous pad hits.
-        active_zones  = set()
-        roll_targeted = False
-        dot_positions = []   # (phi_deg, r_cm) for canvas dots
-
+        # ── Canvas dots: show hand positions if sensor provides targets ────────
+        # (GetSensorTargets may return empty list with PROF_SENSOR + narrow theta)
+        dot_positions = []
         for t in targets:
-            # GetSensorTargets polar convention: xPosCm = R (range cm), yPosCm = phi (degrees)
             r_cm    = t.xPosCm
             phi_deg = t.yPosCm
-            if r_cm < R_MIN or r_cm > R_MAX:
-                continue
-            dot_positions.append((phi_deg, r_cm))
+            if R_MIN <= r_cm <= R_MAX and PHI_MIN <= phi_deg <= PHI_MAX:
+                dot_positions.append((phi_deg, r_cm))
 
-            # Roll strip (extreme right phi): detected by energy, not targets —
-            # rapid waving creates inconsistent targets, energy is more stable.
-            if phi_deg >= ROLL_PHI_MIN_DEG:
-                roll_targeted = True
-                continue
-
-            # R zone
-            if r_cm <= R_NEAR_MAX_CM:
-                r_idx = 0
-            elif r_cm >= R_FAR_MIN_CM:
-                r_idx = 1
-            else:
-                continue  # near/far dead zone
-
-            # Phi zone
-            for phi_idx, (lo, hi) in enumerate(PHI_ZONE_RANGES):
-                if lo <= phi_deg < hi:
-                    active_zones.add((r_idx, phi_idx))
-                    break
-
-        # ── Update live hand-position dots ─────────────────────────────────────
         for k, dot_id in enumerate(self.target_dots):
             if k < len(dot_positions):
                 phi_deg, r_cm = dot_positions[k]
@@ -429,7 +403,8 @@ class DrumApp(tk.Frame):
             else:
                 self.canvas.itemconfigure(dot_id, state=tk.HIDDEN)
 
-        # ── Pad glow (raw-image energy) + hit (target-zone presence) ──────────
+        # ── Pad glow + hit — energy-based (two hands in different zones both
+        #    fire independently since each zone's energy sum is computed separately)
         for pid, label, r_idx, phi_idx, col_idle, col_hit, wav in PADS:
             energy = sum(img[i][j]
                          for i in self.r_ranges[r_idx]
@@ -448,9 +423,8 @@ class DrumApp(tk.Frame):
                     int(b1 + (b2-b1)*frac))
                 self.canvas.itemconfigure(self.poly_ids[pid][0], fill=fill)
 
-            # Hit: trigger when a tracked target enters this zone
-            in_zone = (r_idx, phi_idx) in active_zones
-            if in_zone:
+            # Hit detection
+            if energy > thresh:
                 if self.pad_state[pid] == 'out' and self.pad_delay[pid] == 0:
                     self._hit(pid, wav, col_hit)
                 self.pad_state[pid] = 'in'
@@ -483,11 +457,8 @@ class DrumApp(tk.Frame):
         if self.roll_sustain >= ROLL_SUSTAIN_FRAMES and self.roll_lockout == 0:
             self._roll_hit()
 
-        # ── Status: show target count for live diagnostic feedback ─────────────
-        n = len(targets)
         total = sum(self.pad_hits.values()) + self.roll_hits
-        self.statusVar.set('Ready · {} hits · {} hand{} detected'.format(
-            total, n, 's' if n != 1 else ''))
+        self.statusVar.set('Ready · {} hits'.format(total))
 
         self.cycleId = self.after(33, self.loop)
 
