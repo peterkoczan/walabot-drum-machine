@@ -58,6 +58,10 @@ ENERGY_THRESHOLD = 300   # default; adjustable via slider at runtime
 DELAY_FRAMES     = 5     # at ~30fps = 165ms > FLASH_MS, glow never races the restore
 FLASH_MS         = 140
 BAR_MAX          = 1500
+# Radar signal attenuates ~R^4 with distance, so far-zone pads return far less
+# raw energy than near-zone pads for the same hand movement. This multiplier
+# scales far-zone energy before threshold comparison and glow to equalise sensitivity.
+FAR_BOOST        = 3.0
 
 # ── Drum-roll constants (NEAR + outer-right = bottom-right of fan) ────────────
 ROLL_WAV            = _wav('snare')
@@ -285,6 +289,8 @@ class DrumApp(tk.Frame):
             energy = sum(img[i][j]
                          for i in self.r_ranges[r_idx]
                          for j in self.phi_ranges[phi_idx])
+            if r_idx == 1:
+                energy *= FAR_BOOST
 
             # Glow proportional to energy (suppressed during flash)
             if self.pad_delay[pid] == 0:
