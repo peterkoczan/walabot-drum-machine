@@ -147,9 +147,21 @@ ROLL_BOOST           = 3.0
 ROLL_STRIP_A0 = 30
 ROLL_STRIP_A1 = 44
 
+# ── Two-hand target tracking ─────────────────────────────────────────────────
+# GetSensorTargets() returns individual hand objects (xPosCm, zPosCm, amplitude).
+# phi_deg = atan2(x, z), r_cm = hypot(x, z).  MTI filter means every returned
+# target is a moving object — any target in a zone triggers that pad.
+# Zones are in degrees; boundaries match the phi_ranges computed in start_scan().
+PHI_ZONE_RANGES  = [(-60, -30), (-28, -2), (2, 28), (32, 44)]  # per pad zone
+ROLL_PHI_MIN_DEG = 45      # targets with phi > this → roll strip
+R_NEAR_MAX_CM    = 37      # near-zone threshold (cm)
+R_FAR_MIN_CM     = 38      # far-zone threshold (cm)
+MAX_TARGETS      = 6       # canvas dots — more than this is noise
+
 # ── Walabot arena ─────────────────────────────────────────────────────────────
-R_MIN, R_MAX, R_RES             = 15, 60, 10
-PHI_MIN, PHI_MAX, PHI_RES       = -60, 60, 5
+# Higher resolution for finer per-hand discrimination.
+R_MIN, R_MAX, R_RES             = 15, 60, 5
+PHI_MIN, PHI_MAX, PHI_RES       = -60, 60, 3
 THETA_MIN, THETA_MAX, THETA_RES = -1, 1, 1
 
 # ── Canvas geometry ───────────────────────────────────────────────────────────
@@ -191,6 +203,14 @@ def label_pos(cx, cy, r, a0, a1):
     return cx + r * math.cos(a), cy - r * math.sin(a)
 
 
+def target_canvas_pos(phi_deg, r_cm):
+    """Map a Walabot target's (phi, r) to canvas (x, y)."""
+    r_px = R_NEAR_PX + (r_cm - R_MIN) * (R_FAR_PX - R_NEAR_PX) / float(R_MAX - R_MIN)
+    r_px = max(5, min(R_FAR_PX, r_px))
+    a = math.radians(90.0 - phi_deg)   # screen angle: 90° = forward, right = less
+    return SX + r_px * math.cos(a), SY - r_px * math.sin(a)
+
+
 # ── App ────────────────────────────────────────────────────────────────────────
 class DrumApp(tk.Frame):
 
@@ -206,6 +226,7 @@ class DrumApp(tk.Frame):
         self.roll_lockout   = 0
         self.roll_sustain   = 0
         self.roll_hits      = 0
+        self.target_dots    = []   # canvas oval IDs for live hand-position indicators
         self.threshold    = ENERGY_THRESHOLD   # live-adjustable via slider
 
         self.statusVar = tk.StringVar(value='Connecting...')
@@ -281,6 +302,12 @@ class DrumApp(tk.Frame):
                 lx, ly + 13, text='0', fill='#666',
                 font='TkFixedFont 8', anchor=tk.CENTER)
 
+        # Live hand-position dots (one per tracked target, hidden until visible)
+        for _ in range(MAX_TARGETS):
+            dot = c.create_oval(0, 0, 0, 0, fill='#ffffff', outline='#00ffff',
+                                width=2, state=tk.HIDDEN)
+            self.target_dots.append(dot)
+
     def _build_controls(self):
         bar = tk.Frame(self, bg='#0a0a0a')
         bar.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -346,8 +373,9 @@ class DrumApp(tk.Frame):
     def loop(self):
         try:
             wlbt.Trigger()
-            res = wlbt.GetRawImageSlice()
-            img = res[0]
+            res     = wlbt.GetRawImageSlice()
+            img     = res[0]
+            targets = wlbt.GetSensorTargets()
         except wlbt.WalabotError:
             self.statusVar.set('Lost connection — reconnecting…')
             self.cycleId = self.after(2000, self._reconnect)
@@ -356,7 +384,51 @@ class DrumApp(tk.Frame):
         thresh = self.threshold
         sX = len(img)
 
-        # Pad detection
+        # ── Build active-zone map from tracked targets ─────────────────────────
+        # Each target represents one hand (MTI filter ensures only moving objects).
+        # Two hands in different zones both appear here → simultaneous pad hits.
+        active_zones  = set()
+        roll_targeted = False
+        dot_positions = []   # (phi_deg, r_cm) for canvas dots
+
+        for t in targets:
+            phi_deg = math.degrees(math.atan2(t.xPosCm, t.zPosCm))
+            r_cm    = math.hypot(t.xPosCm, t.zPosCm)
+            if r_cm < R_MIN or r_cm > R_MAX:
+                continue
+            dot_positions.append((phi_deg, r_cm))
+
+            # Roll strip (extreme right phi): detected by energy, not targets —
+            # rapid waving creates inconsistent targets, energy is more stable.
+            if phi_deg >= ROLL_PHI_MIN_DEG:
+                roll_targeted = True
+                continue
+
+            # R zone
+            if r_cm <= R_NEAR_MAX_CM:
+                r_idx = 0
+            elif r_cm >= R_FAR_MIN_CM:
+                r_idx = 1
+            else:
+                continue  # near/far dead zone
+
+            # Phi zone
+            for phi_idx, (lo, hi) in enumerate(PHI_ZONE_RANGES):
+                if lo <= phi_deg < hi:
+                    active_zones.add((r_idx, phi_idx))
+                    break
+
+        # ── Update live hand-position dots ─────────────────────────────────────
+        for k, dot_id in enumerate(self.target_dots):
+            if k < len(dot_positions):
+                phi_deg, r_cm = dot_positions[k]
+                cx, cy = target_canvas_pos(phi_deg, r_cm)
+                self.canvas.coords(dot_id, cx - 7, cy - 7, cx + 7, cy + 7)
+                self.canvas.itemconfigure(dot_id, state=tk.NORMAL)
+            else:
+                self.canvas.itemconfigure(dot_id, state=tk.HIDDEN)
+
+        # ── Pad glow (raw-image energy) + hit (target-zone presence) ──────────
         for pid, label, r_idx, phi_idx, col_idle, col_hit, wav in PADS:
             energy = sum(img[i][j]
                          for i in self.r_ranges[r_idx]
@@ -375,8 +447,9 @@ class DrumApp(tk.Frame):
                     int(b1 + (b2-b1)*frac))
                 self.canvas.itemconfigure(self.poly_ids[pid][0], fill=fill)
 
-            # Hit detection
-            if energy > thresh:
+            # Hit: trigger when a tracked target enters this zone
+            in_zone = (r_idx, phi_idx) in active_zones
+            if in_zone:
                 if self.pad_state[pid] == 'out' and self.pad_delay[pid] == 0:
                     self._hit(pid, wav, col_hit)
                 self.pad_state[pid] = 'in'
@@ -385,12 +458,11 @@ class DrumApp(tk.Frame):
             if self.pad_delay[pid] > 0:
                 self.pad_delay[pid] -= 1
 
-        # Roll strip — exclusive extreme-right bins, all R depths
+        # ── Roll strip — energy-based (more stable for rapid motion) ──────────
         roll_e = sum(img[i][j]
                      for i in range(sX)
                      for j in self.roll_phi_range) * ROLL_BOOST
 
-        # Glow the roll strip (suppressed during flash)
         if self.roll_lockout == 0:
             roll_frac = min(roll_e / float(BAR_MAX), 1.0) * 0.45
             self.canvas.itemconfigure(
@@ -400,7 +472,6 @@ class DrumApp(tk.Frame):
                     int(0x1b + (0xff - 0x1b) * roll_frac),
                     int(0x11 + (0x44 - 0x11) * roll_frac)))
 
-        # Sustain guard: must be above threshold for ROLL_SUSTAIN_FRAMES before firing
         if roll_e > thresh:
             self.roll_sustain = min(self.roll_sustain + 1, ROLL_SUSTAIN_FRAMES + 1)
         else:
@@ -410,6 +481,12 @@ class DrumApp(tk.Frame):
             self.roll_lockout -= 1
         if self.roll_sustain >= ROLL_SUSTAIN_FRAMES and self.roll_lockout == 0:
             self._roll_hit()
+
+        # ── Status: show target count for live diagnostic feedback ─────────────
+        n = len(targets)
+        total = sum(self.pad_hits.values()) + self.roll_hits
+        self.statusVar.set('Ready · {} hits · {} hand{} detected'.format(
+            total, n, 's' if n != 1 else ''))
 
         self.cycleId = self.after(33, self.loop)
 
