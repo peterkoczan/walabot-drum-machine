@@ -36,14 +36,16 @@ class _Mixer:
     sums all active streams each chunk and writes the result.
     """
     RATE  = 44100
-    CHUNK = 512   # ~12 ms per chunk
+    CHUNK = 256   # ~6 ms per chunk — smaller = lower audio latency
 
     def __init__(self):
         self._streams = []          # list of open wave.Wave_read objects
         self._lock    = threading.Lock()
         self._proc    = subprocess.Popen(
             ['aplay', '-q', '-t', 'raw', '-f', 'S16_LE',
-             '-r', str(self.RATE), '-c', '1', '-'],
+             '-r', str(self.RATE), '-c', '1',
+             '--period-size=256', '--buffer-size=1024',  # ~6 ms period, ~23 ms total ALSA buffer
+             '-'],
             stdin=subprocess.PIPE,
             bufsize=0,              # unbuffered — every chunk reaches aplay immediately
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -123,7 +125,7 @@ PADS = [
 
 # ── Detection constants ────────────────────────────────────────────────────────
 ENERGY_THRESHOLD = 300   # default; adjustable via slider at runtime
-DELAY_FRAMES     = 5     # at ~30fps = 165ms > FLASH_MS, glow never races the restore
+DELAY_FRAMES     = 8     # at 20ms/frame = 160ms > FLASH_MS=140ms — glow never races the restore
 FLASH_MS         = 140
 BAR_MAX          = 1500
 # Radar signal attenuates ~R^4 with distance, so far-zone pads return far less
@@ -369,7 +371,7 @@ class DrumApp(tk.Frame):
         self.roll_phi_range = range(sY - 4, sY)
 
         self._update_status()
-        self.cycleId = self.after(33, self.loop)
+        self.cycleId = self.after(20, self.loop)
 
     def loop(self):
         try:
@@ -460,7 +462,7 @@ class DrumApp(tk.Frame):
         total = sum(self.pad_hits.values()) + self.roll_hits
         self.statusVar.set('Ready · {} hits'.format(total))
 
-        self.cycleId = self.after(33, self.loop)
+        self.cycleId = self.after(20, self.loop)
 
     def _reconnect(self):
         try:
@@ -478,7 +480,7 @@ class DrumApp(tk.Frame):
             for _ in range(5):
                 wlbt.Trigger()
             self._update_status()
-            self.cycleId = self.after(33, self.loop)
+            self.cycleId = self.after(20, self.loop)
         except Exception:
             self.statusVar.set('Reconnect failed — retrying in 3 s…')
             self.cycleId = self.after(3000, self._reconnect)
