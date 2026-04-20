@@ -139,6 +139,9 @@ ROLL_WAV             = _wav('snare')
 ROLL_LOCKOUT_FRAMES  = 2    # fires every 3 frames while sustained
 ROLL_SUSTAIN_FRAMES  = 2    # frames above threshold before roll activates
 ROLL_FLASH_MS        = 80
+# Roll strip is only 3-4 phi bins wide; boost energy so threshold comparisons
+# are proportional to the narrower zone (same hand wave → similar energy score)
+ROLL_BOOST           = 3.0
 
 # Screen-angle range for the roll-strip visual on the fan (extreme right sector)
 ROLL_STRIP_A0 = 30
@@ -332,10 +335,10 @@ class DrumApp(tk.Frame):
             range(0,           q - 1),        # outer-left
             range(q + 1,   2*q - 1),          # inner-left
             range(2*q + 1, 3*q - 1),          # inner-right
-            range(3*q + 1, sY - 3),           # outer-right (CLAP / Open HH)
+            range(3*q + 1, sY - 4),           # outer-right (CLAP / Open HH)
         ]
-        # Roll strip: extreme-right bins, spans ALL R depths (full arm sweep)
-        self.roll_phi_range = range(sY - 3, sY)
+        # Roll strip: extreme-right 4 bins, spans ALL R depths (full arm sweep)
+        self.roll_phi_range = range(sY - 4, sY)
 
         self._update_status()
         self.cycleId = self.after(33, self.loop)
@@ -385,7 +388,7 @@ class DrumApp(tk.Frame):
         # Roll strip — exclusive extreme-right bins, all R depths
         roll_e = sum(img[i][j]
                      for i in range(sX)
-                     for j in self.roll_phi_range)
+                     for j in self.roll_phi_range) * ROLL_BOOST
 
         # Glow the roll strip (suppressed during flash)
         if self.roll_lockout == 0:
