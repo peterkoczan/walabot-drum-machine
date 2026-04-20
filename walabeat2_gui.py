@@ -130,7 +130,9 @@ BAR_MAX          = 1500
 # Radar signal attenuates ~R^4 with distance, so far-zone pads return far less
 # raw energy than near-zone pads for the same hand movement. This multiplier
 # scales far-zone energy before threshold comparison and glow to equalise sensitivity.
-FAR_BOOST        = 3.0
+# With R_MAX extended to 90 cm the far zone midpoint is ~75 cm vs ~37 cm near,
+# so attenuation is roughly (75/37)^4 ≈ 17× — boost to 5.0 to compensate.
+FAR_BOOST        = 5.0
 
 # ── Drum-roll constants ────────────────────────────────────────────────────────
 # Roll occupies the extreme-right phi strip (separate from CLAP/OpenHH).
@@ -155,21 +157,23 @@ ROLL_STRIP_A1 = 44
 # Zones are in degrees; boundaries match the phi_ranges computed in start_scan().
 PHI_ZONE_RANGES  = [(-60, -30), (-28, -2), (2, 28), (32, 44)]  # per pad zone
 ROLL_PHI_MIN_DEG = 45      # targets with phi > this → roll strip
-R_NEAR_MAX_CM    = 37      # near-zone threshold (cm)
-R_FAR_MIN_CM     = 38      # far-zone threshold (cm)
+R_NEAR_MAX_CM    = 54      # near-zone threshold (cm) — R 20-54 = 2-FINGERS zone
+R_FAR_MIN_CM     = 56      # far-zone threshold (cm)  — R 56-90 = FULL HAND zone
 MAX_TARGETS      = 6       # canvas dots — more than this is noise
 
 # ── Walabot arena ─────────────────────────────────────────────────────────────
-# Higher resolution for finer per-hand discrimination.
-R_MIN, R_MAX, R_RES             = 15, 60, 5
+# R range extended to 90 cm so hands can be held high above the sensor.
+# Near zone: 20-55 cm (hands hovering low/close).
+# Far  zone: 60-90 cm (arms raised, air-drum style).
+R_MIN, R_MAX, R_RES             = 20, 90, 5
 PHI_MIN, PHI_MAX, PHI_RES       = -60, 60, 3
 THETA_MIN, THETA_MAX, THETA_RES = -1, 1, 1
 
 # ── Canvas geometry ───────────────────────────────────────────────────────────
-CW, CH     = 580, 390
-SX, SY     = CW // 2, 360   # sensor position (bottom-centre of canvas)
-R_NEAR_PX  = 130
-R_FAR_PX   = 270
+CW, CH     = 700, 470
+SX, SY     = CW // 2, 440   # sensor position (bottom-centre of canvas)
+R_NEAR_PX  = 155
+R_FAR_PX   = 320
 
 # Dead zone gaps shown as dark space between active sectors.
 # Detection code skips the corresponding data bins too (see start_scan).
