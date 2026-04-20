@@ -21,55 +21,85 @@ def save(name, samples):
         f.writeframes(struct.pack('<%dh' % len(samples), *samples))
     print('wrote', path)
 
-def sine(freq, dur, amp=32767, decay=8):
-    n = int(RATE * dur)
-    return [amp * math.exp(-decay * i / RATE) * math.sin(2 * math.pi * freq * i / RATE)
-            for i in range(n)]
-
-def chirp(f0, f1, dur, amp=32767, decay=8):
-    n = int(RATE * dur)
-    return [amp * math.exp(-decay * i / RATE) *
-            math.sin(2 * math.pi * (f0 * i / RATE + (f1 - f0) / (2 * dur) * (i / RATE) ** 2))
-            for i in range(n)]
-
-def noise(dur, amp=32767, decay=30):
-    n = int(RATE * dur)
-    return [amp * math.exp(-decay * i / RATE) * (random.random() * 2 - 1) for i in range(n)]
-
 def mix(*tracks):
     length = max(len(t) for t in tracks)
-    out = [0] * length
+    out = [0.0] * length
     for t in tracks:
         for i, v in enumerate(t):
             out[i] += v
     peak = max(abs(v) for v in out) or 1
-    scale = 32767 / peak
-    return [v * scale for v in out]
+    return [v * 32767 / peak for v in out]
 
-# Hi-hat: short high-frequency noise burst
-save('hh',      noise(0.08, decay=60))
+def env(samples, decay):
+    return [s * math.exp(-decay * i / RATE) for i, s in enumerate(samples)]
 
-# Snare: noise + low sine body
-save('snare',   mix(noise(0.15, amp=24000, decay=25),
-                    sine(180, 0.15, amp=16000, decay=20)))
+def sine(freq, dur, decay=8):
+    n = int(RATE * dur)
+    return env([math.sin(2 * math.pi * freq * i / RATE) * 32767 for i in range(n)], decay)
 
-# Kick: low chirp dropping in pitch
-save('kick',    chirp(160, 50, 0.35, decay=10))
+def chirp(f0, f1, dur, decay=8):
+    n = int(RATE * dur)
+    return env([32767 * math.sin(2 * math.pi * (
+        f0 * i / RATE + (f1 - f0) / (2 * dur) * (i / RATE) ** 2))
+        for i in range(n)], decay)
 
-# Clap: very short layered noise burst
-save('clap',    mix(noise(0.06, amp=28000, decay=80),
-                    noise(0.06, amp=20000, decay=120)))
+def noise(dur, decay=30):
+    return env([32767 * (random.random() * 2 - 1) for _ in range(int(RATE * dur))], decay)
 
-# Crash: long noise with slow decay
-save('crash',   noise(0.6, amp=30000, decay=8))
+def click(dur=0.003):
+    return env([32767 * (random.random() * 2 - 1) for _ in range(int(RATE * dur))], decay=400)
 
-# Tom: mid-frequency pitch drop
-save('tom',     chirp(220, 80, 0.30, decay=9))
+# ── Kick: click + pitched body + sub-bass ─────────────────────────────────────
+save('kick', mix(
+    click(0.004),
+    chirp(150, 45, 0.35, decay=9),
+    sine(55, 0.35, decay=7),
+    noise(0.02, decay=80),
+))
 
-# Ride: medium-length high sine (bell-like)
-save('ride',    sine(900, 0.40, amp=28000, decay=12))
+# ── Snare: crack transient + noise rattle + body tone ─────────────────────────
+save('snare', mix(
+    click(0.003),
+    noise(0.18, decay=22),
+    sine(200, 0.12, decay=18),
+    sine(320, 0.08, decay=25),
+))
 
-# Open hi-hat: longer noise than closed hh
-save('open_hh', noise(0.30, amp=28000, decay=15))
+# ── Hi-hat: tight noise burst ─────────────────────────────────────────────────
+save('hh', noise(0.07, decay=70))
+
+# ── Open hi-hat: longer shimmer ───────────────────────────────────────────────
+save('open_hh', mix(
+    noise(0.35, decay=12),
+    sine(800, 0.25, decay=14),
+))
+
+# ── Clap: staggered noise layers (simulates many hands) ───────────────────────
+def clap_layer(offset_ms):
+    offset = int(RATE * offset_ms / 1000)
+    return [0.0] * offset + noise(0.06, decay=90)
+
+save('clap', mix(clap_layer(0), clap_layer(6), clap_layer(12)))
+
+# ── Crash: long complex noise ─────────────────────────────────────────────────
+save('crash', mix(
+    noise(0.8, decay=6),
+    sine(680, 0.6, decay=7),
+    sine(1100, 0.4, decay=9),
+))
+
+# ── Tom: mid pitch drop ───────────────────────────────────────────────────────
+save('tom', mix(
+    click(0.003),
+    chirp(200, 70, 0.30, decay=9),
+    sine(80, 0.25, decay=10),
+))
+
+# ── Ride: bell ring + shimmer ─────────────────────────────────────────────────
+save('ride', mix(
+    sine(850, 0.5, decay=10),
+    sine(1300, 0.3, decay=14),
+    noise(0.05, decay=60),
+))
 
 print('All sounds generated.')

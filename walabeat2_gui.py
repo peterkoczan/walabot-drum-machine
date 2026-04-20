@@ -8,25 +8,37 @@ Wave a hand in any sector to hit that drum.
     NEAR  [HiHat] [Kick] [Snare] [Clap]
 """
 from __future__ import print_function, division
-import os, math, subprocess, signal
+import os, math, subprocess, signal, platform, threading
 import WalabotAPI as wlbt
 try:
     import tkinter as tk
 except ImportError:
     import Tkinter as tk
 
-# Auto-reap finished aplay subprocesses (no zombies = no audio dropouts)
-signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+# Reap zombie subprocesses on Linux so audio never blocks (no-op on other platforms)
+if hasattr(signal, 'SIGCHLD'):
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
-_DIR = os.path.dirname(os.path.abspath(__file__))
+_DIR    = os.path.dirname(os.path.abspath(__file__))
+_SYSTEM = platform.system()
 
 def _wav(name):
     return os.path.join(_DIR, name + '.wav')
 
 def _play(path):
-    subprocess.Popen(['aplay', '-q', path],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Non-blocking WAV playback on Linux, macOS and Windows."""
+    if _SYSTEM == 'Linux':
+        subprocess.Popen(['aplay', '-q', path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif _SYSTEM == 'Darwin':
+        subprocess.Popen(['afplay', path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif _SYSTEM == 'Windows':
+        import winsound
+        threading.Thread(target=winsound.PlaySound,
+                         args=(path, winsound.SND_FILENAME),
+                         daemon=True).start()
 
 # ── Pad definitions ────────────────────────────────────────────────────────────
 # (id, label, r_idx 0=near/1=far, phi_idx 0‥3 left→right, idle_color, hit_color, wav)
@@ -42,20 +54,19 @@ PADS = [
 ]
 
 # ── Detection constants ────────────────────────────────────────────────────────
-ENERGY_THRESHOLD = 300
-DELAY_FRAMES     = 5   # at ~30fps this is 165ms > FLASH_MS, so glow never races the restore
+ENERGY_THRESHOLD = 300   # default; adjustable via slider at runtime
+DELAY_FRAMES     = 5     # at ~30fps = 165ms > FLASH_MS, glow never races the restore
 FLASH_MS         = 140
 BAR_MAX          = 1500
 
 # ── Drum-roll constants (NEAR + outer-right = bottom-right of fan) ────────────
-ROLL_WAV            = _wav('snare')  # snare roll
-ROLL_THRESHOLD      = 300            # same zone size as one pad (~16 cells near+outer-right)
-ROLL_LOCKOUT_FRAMES = 2              # sustained: fires every 3 frames while above threshold
-ROLL_FLASH_MS       = 80             # badge flash duration
+ROLL_WAV            = _wav('snare')
+ROLL_LOCKOUT_FRAMES = 2       # fires every 3 frames while sustained above threshold
+ROLL_FLASH_MS       = 80
 
 # ── Walabot arena ─────────────────────────────────────────────────────────────
-R_MIN, R_MAX, R_RES         = 15, 60, 10
-PHI_MIN, PHI_MAX, PHI_RES   = -60, 60, 5
+R_MIN, R_MAX, R_RES             = 15, 60, 10
+PHI_MIN, PHI_MAX, PHI_RES       = -60, 60, 5
 THETA_MIN, THETA_MAX, THETA_RES = -1, 1, 1
 
 # ── Canvas geometry ───────────────────────────────────────────────────────────
@@ -64,18 +75,18 @@ SX, SY     = CW // 2, 360   # sensor position (bottom-centre of canvas)
 R_NEAR_PX  = 130
 R_FAR_PX   = 270
 
-# Dead zone gaps (pixels / degrees) shown as dark space between active sectors.
+# Dead zone gaps shown as dark space between active sectors.
 # Detection code skips the corresponding data bins too (see start_scan).
-DEAD_R_PX   = 20   # pixel gap at near/far radial boundary
-DEAD_PHI_DEG = 4   # angular gap between adjacent phi sectors (half applied per side)
+DEAD_R_PX    = 20   # pixel gap at near/far radial boundary
+DEAD_PHI_DEG =  4   # angular gap between adjacent phi sectors
 
-# Active sector screen-angle ranges (shrunk inward from full 30° zones by DEAD_PHI_DEG):
-# outer sectors only lose half-gap on their inner edge (canvas edge = their outer boundary)
+# Active sector screen-angle ranges (shrunk inward from full 30° zones):
+# outer sectors only lose the gap on their inner edge (canvas edge = outer boundary)
 PHI_SECTORS = [
-    (120 + DEAD_PHI_DEG, 150),                            # index 0: outer-left
-    ( 90 + DEAD_PHI_DEG,  120 - DEAD_PHI_DEG),            # index 1: inner-left
-    ( 60 + DEAD_PHI_DEG,   90 - DEAD_PHI_DEG),            # index 2: inner-right
-    ( 30,                  60 - DEAD_PHI_DEG),             # index 3: outer-right
+    (120 + DEAD_PHI_DEG, 150),
+    ( 90 + DEAD_PHI_DEG, 120 - DEAD_PHI_DEG),
+    ( 60 + DEAD_PHI_DEG,  90 - DEAD_PHI_DEG),
+    ( 30,                  60 - DEAD_PHI_DEG),
 ]
 
 
@@ -101,16 +112,15 @@ class DrumApp(tk.Frame):
 
     def __init__(self, master):
         tk.Frame.__init__(self, master, bg='#0a0a0a')
-        self.pad_state  = {p[0]: 'out' for p in PADS}
-        self.pad_delay  = {p[0]: 0     for p in PADS}
-        self.pad_hits   = {p[0]: 0     for p in PADS}
-        self.cycleId    = None
-        self.r_ranges   = None
-        self.phi_ranges = None
-        self.sX         = None
-        # Drum-roll state
+        self.pad_state    = {p[0]: 'out' for p in PADS}
+        self.pad_delay    = {p[0]: 0     for p in PADS}
+        self.pad_hits     = {p[0]: 0     for p in PADS}
+        self.cycleId      = None
+        self.r_ranges     = None
+        self.phi_ranges   = None
         self.roll_lockout = 0
         self.roll_hits    = 0
+        self.threshold    = ENERGY_THRESHOLD   # live-adjustable via slider
 
         self.statusVar = tk.StringVar(value='Connecting...')
         tk.Label(self, textvariable=self.statusVar, font='TkFixedFont 9',
@@ -122,6 +132,7 @@ class DrumApp(tk.Frame):
         self.canvas.pack(padx=8, pady=4)
 
         self._build_canvas()
+        self._build_controls()
 
         self._init_walabot()
         self.after(200, self.start_scan)
@@ -151,15 +162,12 @@ class DrumApp(tk.Frame):
         c.create_text(SX, SY+14, text='SENSOR', fill='#555', font='TkFixedFont 7')
 
         # Zone depth labels
-        r_near_label = R_NEAR_PX * 0.55
-        r_far_label  = (R_NEAR_PX + R_FAR_PX) / 2
-        c.create_text(SX - R_FAR_PX - 8, SY - r_far_label,
-                      text='FAR', fill='#444', font='TkFixedFont 8', anchor=tk.E)
-        c.create_text(SX - R_FAR_PX - 8, SY - r_near_label,
+        c.create_text(SX - R_FAR_PX - 8, SY - (R_NEAR_PX + R_FAR_PX) / 2,
+                      text='FAR',  fill='#444', font='TkFixedFont 8', anchor=tk.E)
+        c.create_text(SX - R_FAR_PX - 8, SY - R_NEAR_PX * 0.55,
                       text='NEAR', fill='#444', font='TkFixedFont 8', anchor=tk.E)
 
-        # ROLL badge — bottom-right canvas corner (below the CLAP sector)
-        # Canvas bottom-right empty area: x≈415-572, y≈310-378
+        # ROLL badge — bottom-right canvas corner
         _bx1, _by1, _bx2, _by2 = 418, 312, 572, 375
         _bmx = (_bx1 + _bx2) // 2
         self.roll_badge_bg = c.create_rectangle(
@@ -177,9 +185,8 @@ class DrumApp(tk.Frame):
 
         # Sector polygons, name labels, hit count labels
         for pid, label, r_idx, phi_idx, col_idle, col_hit, wav in PADS:
-            # Inset by DEAD_R_PX at the near/far boundary to show dead zone gap
-            r_in  = 5                            if r_idx == 0 else R_NEAR_PX + DEAD_R_PX
-            r_out = R_NEAR_PX - DEAD_R_PX        if r_idx == 0 else R_FAR_PX
+            r_in  = 5                       if r_idx == 0 else R_NEAR_PX + DEAD_R_PX
+            r_out = R_NEAR_PX - DEAD_R_PX   if r_idx == 0 else R_FAR_PX
             r_lbl = (r_in + r_out) / 2
             a0, a1 = PHI_SECTORS[phi_idx]
 
@@ -194,6 +201,27 @@ class DrumApp(tk.Frame):
             self.count_ids[pid] = c.create_text(
                 lx, ly + 13, text='0', fill='#666',
                 font='TkFixedFont 8', anchor=tk.CENTER)
+
+    def _build_controls(self):
+        bar = tk.Frame(self, bg='#0a0a0a')
+        bar.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        tk.Label(bar, text='THRESHOLD', font='TkFixedFont 7',
+                 bg='#0a0a0a', fg='#555').pack(side=tk.LEFT, padx=(0, 4))
+
+        self.threshVar = tk.IntVar(value=ENERGY_THRESHOLD)
+        self.threshVar.trace_add('write', self._on_threshold_change)
+        tk.Scale(bar, from_=50, to=1000, orient=tk.HORIZONTAL,
+                 variable=self.threshVar, showvalue=True,
+                 bg='#0a0a0a', fg='#888888', troughcolor='#1a1a1a',
+                 activebackground='#444', highlightthickness=0,
+                 font='TkFixedFont 7', length=420, sliderlength=12,
+                 bd=0).pack(side=tk.LEFT)
+
+        tk.Button(bar, text='RESET', font='TkFixedFont 8',
+                  bg='#1a1a1a', fg='#888888', activebackground='#333',
+                  activeforeground='#ffffff', relief=tk.FLAT, bd=1,
+                  padx=8, command=self._reset).pack(side=tk.RIGHT, padx=(8, 0))
 
     # ── Walabot ───────────────────────────────────────────────────────────────
 
@@ -216,7 +244,6 @@ class DrumApp(tk.Frame):
         wlbt.Trigger()
         res = wlbt.GetRawImageSlice()
         sX, sY = res[1], res[2]
-        self.sX = sX   # stored for roll detection (all R bins)
 
         # 2 R zones — skip 1 bin at the near/far boundary as dead zone
         mid = sX // 2
@@ -231,28 +258,39 @@ class DrumApp(tk.Frame):
             range(3*q + 1,     sY),
         ]
 
-        self.statusVar.set('Ready  |  sX={} sY={}'.format(sX, sY))
-        self.cycleId = self.after(33, self.loop)   # ~30fps cap
+        self._update_status()
+        self.cycleId = self.after(33, self.loop)
 
     def loop(self):
         try:
             wlbt.Trigger()
             res = wlbt.GetRawImageSlice()
             img = res[0]
-        except wlbt.WalabotError as e:
-            self.statusVar.set('Error: {}'.format(e))
+        except wlbt.WalabotError:
+            self.statusVar.set('Lost connection — reconnecting…')
+            self.cycleId = self.after(2000, self._reconnect)
             return
+
+        thresh = self.threshold
+
+        # Compute roll energy first — needed to suppress CLAP during roll.
+        # CLAP and ROLL share the same zone (near, outer-right): without this
+        # guard every roll wave re-arms CLAP and fires it too.
+        roll_e = sum(img[i][j]
+                     for i in self.r_ranges[0]
+                     for j in self.phi_ranges[3])
+        is_rolling = roll_e > thresh
 
         for pid, label, r_idx, phi_idx, col_idle, col_hit, wav in PADS:
             energy = sum(img[i][j]
                          for i in self.r_ranges[r_idx]
                          for j in self.phi_ranges[phi_idx])
 
-            # Glow proportional to energy
+            # Glow proportional to energy (suppressed during flash)
             if self.pad_delay[pid] == 0:
                 frac = min(energy / float(BAR_MAX), 1.0) * 0.45
-                r1,g1,b1 = self._hex_rgb(col_idle)
-                r2,g2,b2 = self._hex_rgb(col_hit)
+                r1, g1, b1 = self._hex_rgb(col_idle)
+                r2, g2, b2 = self._hex_rgb(col_hit)
                 fill = '#{:02x}{:02x}{:02x}'.format(
                     int(r1 + (r2-r1)*frac),
                     int(g1 + (g2-g1)*frac),
@@ -260,26 +298,47 @@ class DrumApp(tk.Frame):
                 self.canvas.itemconfigure(self.poly_ids[pid][0], fill=fill)
 
             # Hit detection
-            if energy > ENERGY_THRESHOLD:
+            if energy > thresh:
                 if self.pad_state[pid] == 'out' and self.pad_delay[pid] == 0:
-                    self._hit(pid, wav, col_hit)
+                    if not (pid == 'clap' and is_rolling):
+                        self._hit(pid, wav, col_hit)
                 self.pad_state[pid] = 'in'
             else:
-                self.pad_state[pid] = 'out'
+                # Keep CLAP armed as 'in' while rolling so it can't re-trigger
+                # between the rapid energy pulses of each roll wave.
+                if not (pid == 'clap' and is_rolling):
+                    self.pad_state[pid] = 'out'
             if self.pad_delay[pid] > 0:
                 self.pad_delay[pid] -= 1
 
-        # ── Drum-roll detection: NEAR + outer-right (bottom-right of fan) ───────
-        # Sustained trigger: fires every ROLL_LOCKOUT_FRAMES+1 frames while above threshold
-        roll_e = sum(img[i][j]
-                     for i in self.r_ranges[0]    # NEAR range only
-                     for j in self.phi_ranges[3])
+        # Drum-roll: fires every ROLL_LOCKOUT_FRAMES+1 frames while sustained
         if self.roll_lockout > 0:
             self.roll_lockout -= 1
-        if roll_e > ROLL_THRESHOLD and self.roll_lockout == 0:
+        if is_rolling and self.roll_lockout == 0:
             self._roll_hit()
 
-        self.cycleId = self.after(33, self.loop)   # ~30fps cap
+        self.cycleId = self.after(33, self.loop)
+
+    def _reconnect(self):
+        try:
+            wlbt.Stop()
+        except Exception:
+            pass
+        try:
+            wlbt.Disconnect()
+        except Exception:
+            pass
+        try:
+            wlbt.ConnectAny()
+            wlbt.Start()
+            self.statusVar.set('Reconnected — warming up…')
+            for _ in range(5):
+                wlbt.Trigger()
+            self._update_status()
+            self.cycleId = self.after(33, self.loop)
+        except Exception:
+            self.statusVar.set('Reconnect failed — retrying in 3 s…')
+            self.cycleId = self.after(3000, self._reconnect)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -293,16 +352,35 @@ class DrumApp(tk.Frame):
         self.canvas.itemconfigure(self.count_ids[pid],
                                   text=str(self.pad_hits[pid]))
         _play(wav)
+        self._update_status()
 
     def _roll_hit(self):
         self.roll_hits += 1
         self.roll_lockout = ROLL_LOCKOUT_FRAMES
-        # Flash ONLY the dedicated badge — never write to pad polygons (avoids glow conflict)
         self.canvas.itemconfigure(self.roll_badge_bg, fill='#aaffaa')
         self.after(ROLL_FLASH_MS, lambda: self.canvas.itemconfigure(
             self.roll_badge_bg, fill='#111b11'))
         self.canvas.itemconfigure(self.roll_count_id, text=str(self.roll_hits))
         _play(ROLL_WAV)
+        self._update_status()
+
+    def _reset(self):
+        for pid in self.pad_hits:
+            self.pad_hits[pid] = 0
+            self.canvas.itemconfigure(self.count_ids[pid], text='0')
+        self.roll_hits = 0
+        self.canvas.itemconfigure(self.roll_count_id, text='')
+        self._update_status()
+
+    def _update_status(self):
+        total = sum(self.pad_hits.values()) + self.roll_hits
+        self.statusVar.set('Ready · {} hits'.format(total))
+
+    def _on_threshold_change(self, *_):
+        try:
+            self.threshold = self.threshVar.get()
+        except tk.TclError:
+            pass
 
     @staticmethod
     def _hex_rgb(h):
