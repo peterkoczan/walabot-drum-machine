@@ -8,7 +8,7 @@ Wave a hand in any sector to hit that drum.
     NEAR  [HiHat] [Kick] [Snare] [Clap]
 """
 from __future__ import print_function, division
-import os, math, subprocess, signal, platform, threading
+import os, math, subprocess, signal, platform, threading, wave, struct
 import WalabotAPI as wlbt
 try:
     import tkinter as tk
@@ -26,19 +26,86 @@ _SYSTEM = platform.system()
 def _wav(name):
     return os.path.join(_DIR, name + '.wav')
 
-def _play(path):
-    """Non-blocking WAV playback on Linux, macOS and Windows."""
-    if _SYSTEM == 'Linux':
-        subprocess.Popen(['aplay', '-q', path],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    elif _SYSTEM == 'Darwin':
+
+class _Mixer:
+    """Single aplay process + in-process PCM mixer (Linux).
+
+    Replicates pygame.mixer channel behaviour: every _play() call adds a new
+    stream to the mix so sounds overlap naturally instead of cutting each other.
+    One persistent aplay reads raw S16_LE mono from stdin; the mixing thread
+    sums all active streams each chunk and writes the result.
+    """
+    RATE  = 44100
+    CHUNK = 512   # ~12 ms per chunk
+
+    def __init__(self):
+        self._streams = []          # list of open wave.Wave_read objects
+        self._lock    = threading.Lock()
+        self._proc    = subprocess.Popen(
+            ['aplay', '-q', '-t', 'raw', '-f', 'S16_LE',
+             '-r', str(self.RATE), '-c', '1', '-'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def play(self, path):
+        try:
+            wf = wave.open(path, 'rb')
+            with self._lock:
+                self._streams.append(wf)
+        except Exception:
+            pass
+
+    def _run(self):
+        silence = b'\x00' * self.CHUNK * 2
+        while True:
+            with self._lock:
+                alive, chunks = [], []
+                for wf in self._streams:
+                    data = wf.readframes(self.CHUNK)
+                    if data:
+                        chunks.append(data)
+                        alive.append(wf)
+                    else:
+                        wf.close()
+                self._streams = alive
+
+            if chunks:
+                out = [0] * self.CHUNK
+                for data in chunks:
+                    for i, s in enumerate(
+                            struct.unpack('<%dh' % (len(data) // 2), data)):
+                        out[i] += s
+                buf = struct.pack(
+                    '<%dh' % self.CHUNK,
+                    *[max(-32768, min(32767, s)) for s in out])
+            else:
+                buf = silence   # keep aplay alive between hits
+
+            try:
+                self._proc.stdin.write(buf)
+            except (BrokenPipeError, OSError):
+                break
+
+
+# Instantiate the right playback backend once at import time
+if _SYSTEM == 'Linux':
+    _mixer = _Mixer()
+    def _play(path):
+        _mixer.play(path)
+elif _SYSTEM == 'Darwin':
+    def _play(path):
         subprocess.Popen(['afplay', path],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    elif _SYSTEM == 'Windows':
+elif _SYSTEM == 'Windows':
+    def _play(path):
         import winsound
         threading.Thread(target=winsound.PlaySound,
                          args=(path, winsound.SND_FILENAME),
                          daemon=True).start()
+else:
+    def _play(path):
+        pass
 
 # ── Pad definitions ────────────────────────────────────────────────────────────
 # (id, label, r_idx 0=near/1=far, phi_idx 0‥3 left→right, idle_color, hit_color, wav)
