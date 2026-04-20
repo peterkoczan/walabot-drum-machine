@@ -8,7 +8,7 @@ Wave a hand in any sector to hit that drum.
     NEAR  [HiHat] [Kick] [Snare] [Clap]
 """
 from __future__ import print_function, division
-import os, math, subprocess, signal, platform, threading, wave, struct
+import os, math, subprocess, signal, platform, threading, wave, struct, time
 import WalabotAPI as wlbt
 try:
     import tkinter as tk
@@ -82,6 +82,7 @@ class _Mixer:
                     *[max(-32768, min(32767, s)) for s in out])
             else:
                 buf = silence   # keep aplay alive between hits
+                time.sleep(self.CHUNK / self.RATE)  # ~5.8 ms — prevent OS pipe pre-fill
 
             try:
                 self._proc.stdin.write(buf)
